@@ -18,6 +18,21 @@
       - [固定窗口](#tumbling-windows)
       - [滑动窗口](#sliding-windows)
     - [无状态处理和有状态处理](#stateless-stateful-processing)
+    - [时间的影响](#effect-of-time)
+  - [第3章 流式架构](#chapter-3)
+- [第2部分 Structured Streaming](#part-2)
+  - [第7章 Structured Streaming简介](#chapter-7)
+    - [Structured Streaming的第一步](#first-step-structured-streaming)
+    - [批处理分析](#batch-analysis)
+    - [流处理分析](#streaming-analysis)
+      - [连接到流](#connecting-to-stream)
+      - [准备流中的数据](#prepare-data-int-stream)
+      - [流数据集操作](#operation-on-streaming-dataset)
+      - [创建一个查询](#create-a-query)
+      - [启动流处理](#start-stream-process)
+      - [探索数据](#exploring-data)
+    - [总结](#chapter-7-summary)
+
 
 # <span id="part-1">第1部分 使用Apache Spark进行流处理的基础知识</span>
 
@@ -363,6 +378,375 @@ Tyler Akidau在他的`Streaming Systems`一书中对无限数据的定义如下�
 
 我们用一个非常简单的例子说明了有状态和无状态流处理之间的区别，这个例子有使用这两种方法的解决方案。尽管有状态版本与定义非常相似，但它需要更多的计算资源:它需要遍历一个流并在每个步骤中保持中间值。
 
+无状态版本使用了一种更简单的方法:我们使用一个无状态函数来获得结果。无论我们需要的斐波那契数是9还是999999，在这两种情况下，计算代价的顺序大致相同。
 
+我们可以将这个想法推广到流处理。就其使用的资源而言，有状态处理的成本更高，并且在失败时也会引起关注:如果我们的计算在流的中途失败了，会发生什么?虽然一个安全的经验法则是选择无状态的选项，如果可行的话，我们在数据流中可以问的许多有趣的问题在本质上通常是有状态的。例如:用户在我们的网站上使用了多长时间?出租车穿过城市的路径是什么?工业机器上的压力传感器的移动平均值是多少?
+
+在本书中，我们将看到有状态计算更加通用，但是它们有自己的约束条件。流处理框架的一个重要方面是提供设施来处理这些限制，并使用户能够创造业务需求所需的解决方案。
+
+### <span id="effect-of-time">时间的影响</span>
+
+到目前为止，我们已经考虑了在对数据流的每个元素产生结果时跟踪中间数据的优势，因为它允许我们分析数据流的每一个元素，只要我们将中间数据保持在一个有界的合理大小。现在，我们要考虑流处理特有的另一个问题，即基于事件时间的操作。
+
+
+
+## <span id="chapter-3">第3章 流式架构</span>
+
+<div STYLE ="page-break-after：always;"> </div>
+
+# <span id="part-2">Structured Streaming</span>
+
+在这一部分中，我们将研究`Structured Streaming`。
+
+我们将通过一个实际的示例来开始我们的旅程，该示例将帮助您建立模型。从这里开始，我们研究API并深入到流处理的以下方面的细节：
+
+- 使用数据源消费数据
+- 使用`Dataframe`/`Dataset` API构建数据处理逻辑
+- 了解和处理事件时间
+- 处理流式应用程序中的状态
+- 了解任意状态转换
+- 使用接收器将结果写入其他系统
+
+在结束之前，我们将对`Structured Streaming`的操作方面进行概述。
+
+最后，我们将探讨这个令人兴奋的新流式API的当前发展，并深入了解机器学习应用程序和连续流式近实时数据处理等领域。
+
+## <span id="chapter-7">第7章 Structured Streaming简介</span>
+
+在数据密集型企业中，我们发现了许多大型数据集:面向互联网的服务器的日志文件、购物行为表和带有传感器数据的NoSQL数据库，这只是其中的几个例子。所有这些数据集都有相同的生命周期:它们在某个时间点开始是空的，然后随着数据的产生存入某种形式的辅助存储，我们称之为数据流。然后，我们可以使用我们喜欢的分析工具对这些数据集进行静态处理，称为批处理的技术，因为它们一次性处理大量数据，通常需要相当多的时间来完成，从几分钟到几天。
+
+`Spark SQL`中的`Dataset`就是分析静态数据的一种方法。它对于结构化的数据特别有用。也就是说，它遵循一个定义好的模式。`Spark`中的`Dataset API`结合了类sql形式API的表达能力和类型安全的集合操作，这让人想起Scala集合和弹性分布式数据集(RDD)编程模型。与此同时，与Python Pandas和R Dataframes相似的`Dataframe API`拓宽了`Spark`用户的受众，而不仅仅是那些习惯于在功能范式中进行开发的数据工程师。这种更高层次的抽象旨在支持现代数据工程和数据科学实践，使更广泛的专业人员能够使用熟悉的API进行大数据分析。
+
+如果，我们可以在数据处于原始流形式时应用相同的`Dataset`概念，而不是等待数据“稳定下来”，那会怎么样呢?
+
+`Structured Streaming`是数据集面向sql模型的扩展，用于处理动态数据:
+
+- 假定源数据具有已定义的模式
+- 事件流可以被看作是追加到无界表的行
+- 为了从流中获得结果，我们将计算表达为对该表的查询
+- 通过不断地对更新表应用相同的查询，我们创建了一个已处理事件的输出流
+- 产生的事件被提供给输出接收器
+- 接收器可以是一个存储系统，另一个流后端，或者是一个准备使用已处理数据的应用程序
+
+
+在这个模型中，我们的无界表必须在一个资源有限的物理系统中实现。因此，该模型的实现需要一定的考虑和限制以应对潜在的无限数据流。
+
+为了解决这些挑战，`Structured Streaming`在`Dataset`和`Dataframe` API中引入了新的概念，比如支持事件时间、水位线和不同的输出模式，这些输出模式决定了过去的数据实际存储多长时间。从概念上讲，`Structured Streaming`模型模糊了批处理和流处理之间的界限，消除了对动态数据进行分析的大量推理负担。
+
+### <span id="first-step-structured-streaming">Structured Streaming的第一步</span>
+
+在前一节中，我们学习了`Structured Streaming`的高级概念，如源、接收和查询。我们现在将从实践的角度来探索`Structured Streaming`，使用一个简化的web日志分析用例作为例子。
+
+在我们开始深入研究我们的第一个流应用程序之前，我们将看看`Apache Spark`中的经典批处理分析如何应用于相同的用例。
+
+这个练习有两个主要目标：
+
+首先，大多数流数据分析都是从研究静态数据集合开始的。很容易从数据文件开始研究，直观了解数据模式以及定义从数据中提取预期知识所需的流程。通常情况下，只有在我们定义并测试了数据分析工作后，我们才能将其转换为流处理，以便将分析逻辑应用于动态数据。
+
+其次，从实践的角度来看，我们可以看看`Apache Spark`如何通过使用统一的api来模拟从批处理到流处理应用程序的转换。
+
+这一探索将允许我们对比Spark中的批处理和流式APIs，并向我们展示从批处理迁移到流处理。
+
+```
+线上资源
+
+对于本例，我们使用NASA公布的1995年Apache Web日志，来自 http://ita.ee.lbl.gov/html/contrib/NASA-HTTP.html
+
+在这个练习中，原始日志文件被拆分为天级文件，日志格式为JSON。NASA-weblogs文件可以从 https://github.com/stream-processing-with-spark 获得。
+
+下载这个数据集，并将其放在您的计算机上的一个文件夹中。
+```
+
+### <span id="batch-analysis">批处理分析</span>
+
+鉴于我们正在处理归档日志文件，我们可以一次访问所有数据。在我们开始构建流应用程序之前，让我们先来看看经典的批分析工作是什么样子的。
+
+```
+线上资源
+
+对于本例，我们将使用该书在线资源中的batch_weblogs，网址是
+https://github.com/stream-processing-with-spark
+```
+
+首先，我们从解压目录中加载日志文件，编码为JSON:
+
+```
+// This is the location of the unpackaged files. Update accordingly
+val logsDirectory= ???
+val rawLogs= sparkSession.read.json(logsDirectory)
+```
+
+接下来，我们将数据的模式声明为使用`Dataset API`的case类。日志的结构如下：
+
+```
+日志是一个ASCII文件，每个请求一行，包含以下列：
+
+- 发出请求的主机。在可能的情况下使用主机名，否则如果无法查找该名称，则使用internet地址。
+- 时间戳格式为“DAY MON DD HH:MM:SS YYYY”，其中DAY是一周中的一天，MON是月份的名称，DD是月份的一天，HH:MM:SS是一天中的时间，使用24小时制，YYYY是一年。时区是-0400。
+- 请求，包含在引号中。
+- HTTP code。
+- 响应字节数。
+```
+
+Scala的case类定义如下：
+
+```
+import java.sql.Timestamp
+case class WebLog(host:String,timestamp:Timestamp,request:String,http_reply:Int,bytes:Long)
+//我们使用java.sql.Timestamp作为时间戳的类型，因为它是由Spark内部支持的，不需要任何其他可能的附加类型转换
+```
+
+我们使用前面的模式定义将原始JSON转换为类型化数据结构：
+
+```
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.IntegerType
+
+// we need to narrow the `Interger` type because
+// the JSON representation is interpreted as `BigInteger`
+val preparedLogs = rawLogs.withColumn("http_reply",$"http_reply".cast(IntegerType))
+val weblogs = preparedLogs.as[WebLog]
+```
+
+既然我们有了结构化格式的数据，我们就可以开始处理我们感兴趣的问题了。作为第一步，我们想知道我们的数据集中包含了多少记录
+
+```
+val recordCount= weblogs.count
+> recordCount:Long = 1871988
+```
+
+一个常见的问题是:“每天最流行的URL是什么?”要回答这个问题，我们首先将时间戳减少到一个月的第几天。然后我们根据这个新的dayOfMonth列和请求URL分组，并对这个聚合进行计数。我们最终使用降序排序，以获得top URLs
+
+```
+val topDailyURLs = weblogs.withColumn("dayOfMonth", dayofmonth($"timestamp"))
+.select($"request", $"dayOfMonth").groupBy($"dayOfMonth", $"request")
+.agg(count($"request").alias("count"))
+.orderBy(desc("count"))
+
+topDailyURLs.show()
+
++----------+----------------------------------------+-----+
+|dayOfMonth|        request                         |count|
++----------+----------------------------------------+-----+
+|        13|GET /images/NASA-logosmall.gif HTTP/1.0 |12476|
+|        13|GET /htbin/cdt_main.pl HTTP/1.0         | 7471|
+|        12|GET /images/NASA-logosmall.gif HTTP/1.0 | 7143|
+|        13|GET /htbin/cdt_clock.pl HTTP/1.0        | 6237|
+|         6|GET /images/NASA-logosmall.gif HTTP/1.0 | 6112|
+|         5|GET /images/NASA-logosmall.gif HTTP/1.0 | 5865|
+```
+
+最热门的都是图片。现在该做什么?常见的是，网站中最常用的url是图片。我们真正感兴趣的是产生最多流量的内容页面。要找到它们，我们首先对html内容进行筛选，然后继续应用我们刚刚学习的top聚合。
+
+正如我们所看到的，请求字段是一个引用序列`HTTP_VERB` `URL` `HTTP_VERSION`。我们将提取URL，并只保留以.html、.htm或非扩展名(目录)结尾的URL。这是本例的简化
+
+```
+val urlExtractor= """^GET (.+) HTTP/\d.\d""".r
+val allowedExtensions=Set(".html",".htm", "")
+val contentPageLogs= weblogs.filter {log => 
+    log.requestmatch {
+        case urlExtractor(url) => 
+            val ext = url.takeRight(5).dropWhile(c => c != '.')
+            allowedExtensions.contains(ext)
+        case _ => false
+    }
+}
+```
+
+
+对于这个只包含.html、.htm和目录的新数据集，我们继续应用与前面相同的top-k函数
+
+```
+val topContentPages = contentPageLogs.withColumn("dayOfMonth", dayofmonth($"timestamp"))
+.select($"request", $"dayOfMonth")
+.groupBy($"dayOfMonth", $"request")
+.agg(count($"request").alias("count"))
+.orderBy(desc("count"))
+
+topContentPages.show()
+
++----------+------------------------------------------------+-----+
+|dayOfMonth|                                         request|count|
++----------+------------------------------------------------+-----+
+|        13| GET /shuttle/countdown/liftoff.html HTTP/1.0"  | 4992|
+|         5| GET /shuttle/countdown/ HTTP/1.0"              | 3412|
+|         6| GET /shuttle/countdown/ HTTP/1.0"              | 3393|
+|         3| GET /shuttle/countdown/ HTTP/1.0"              | 3378|
+|        13| GET /shuttle/countdown/ HTTP/1.0"              | 3086|
+|         7| GET /shuttle/countdown/ HTTP/1.0"              | 2935|
+|         4| GET /shuttle/countdown/ HTTP/1.0"              | 2832|
+|         2| GET /shuttle/countdown/ HTTP/1.0"              | 2330|
+...
+```
+
+我们可以看到当月最受欢迎的页面是liftoff.html，对应于NASA档案中记载的发现号航天飞机发射的报道。
+
+### <span id="streaming-analysis">流处理分析</span>
+
+在前一节中，我们探讨了NASA网络日志的历史记录。我们在这些记录中发现了热门事件，但比实际事件发生的时间要晚得多。
+
+流处理分析的一个关键驱动力来自于组织对实时信息日益增长的需求，这些信息可以帮助他们在许多不同的层面上做出决策。
+
+我们可以利用我们所学到的经验教训，同时使用面向批处理的方法来探索归档记录，并创建一个流作业，使热门信息发生时我们就能知道。
+
+我们在批处理分析中观察到的第一个差异是数据的来源。对于我们的流处理练习，我们将使用TCP服务器来模拟一个实时发送日志的web系统。模拟器将使用相同的数据集，但将通过TCP套接字连接提供数据，该连接将包含我们将要分析的流。
+
+```
+线上资源
+
+对于本例，我们将使用 weblog_TCP_server 和 streaming_weblogs，可以在 https://github.com/stream-processing-with-spark 找到
+```
+
+#### <span id="connecting-to-stream">连接到流</span>
+
+如果你还记得本章的介绍，`Structured Streaming`定义了源和接收器的概念，作为消费流和产生结果的关键抽象。我们将使用`TextSocketSource`实现通过TCP套接字连接到服务器。套接字连接是由主机服务器和它侦听连接的端口定义的。这两个配置是创建套接字源所必需的。
+
+```
+val stream = sparkSession.readStream
+.format("socket")
+.option("host", host)
+.option("port", port)
+.load()
+```
+
+请注意，流的创建与批处理中的静态数据源的声明非常相似。我们不使用`read`，而是使用`readstream`，并将源所需的参数传递给它。正如你将在这个练习过程中看到的，稍后当我们进入`Structured Streaming`的细节，API基本上和处理静态数据的`Dataframe`及`Dataset`API类似，但有一些修改和限制，你将详细了解。
+
+#### <span id="prepare-data-int-stream">准备流中的数据</span>
+
+套接字源产生一个带有列的`DataFrame`，其中包含从流接收到的数据。请参阅130页的“套接字来源”了解更多细节。在批量分析的情况下，我们可以直接将数据作为JSON记录加载。在Socket源的情况下，该数据是纯文本。要将原始数据转换为`WebLog`，首先需要一个模式。模式提供了将文本解析为JSON对象的必要信息。这就是我们所说的`Structured Streaming`的结构。
+
+在为数据定义模式之后，我们继续按照以下步骤创建数据集
+
+```
+import java.sql.Timestamp
+case class WebLog(host:String,timestamp:Timestamp,request:String,http_reply:Int,bytes:Long)
+val webLogSchema = Encoders.product[WebLog].schema //1
+val jsonStream = stream.select(from_json($"value", webLogSchema) as "record") //2
+val webLogStream:Dataset[WebLog] = jsonStream.select("record.*").as[WebLog] //3
+```
+
+1. 从类定义获得模式
+2. 使用`Spark SQL`内置的JSON支持将文本转换为JSON
+3. 使用`Dataset` API将JSON记录转换为WebLog对象
+
+通过这个过程，我们得到了一个`WebLog`记录的流数据集。
+
+#### <span id="operation-on-streaming-dataset">流数据集操作</span>
+
+我们刚刚获得的`webLogStream`类型是`Dataset[WebLog]`，就像我们在批量分析作业中所做的那样。这个实例和批处理版本的区别在于`weblogstream`是一个流数据集。
+
+我们可以通过查询对象来观察这一点
+
+```
+webLogStream.isStreaming
+> res:Boolean = true
+```
+
+在批处理作业的这一点上，我们创建了对数据的第一个查询:我们的数据集中包含多少记录?当我们能够访问所有数据时，这是一个很容易回答的问题。但是，我们如何计算不断到达的记录呢?答案是，我们认为通常在静态数据集上的一些操作，如计数所有记录，在流数据集上没有确定的含义。
+
+正如我们可以观察到的，在下面的代码片段中尝试执行计数查询将导致一个`AnalysisException`：
+
+```
+val count= webLogStream.count()
+> org.apache.spark.sql.AnalysisException:Querieswithstreamingsourcesmustbe executedwith writeStream.start();;
+```
+
+这意味着我们在静态`Dataset`或`DataFrame`上使用的直接查询现在需要两级交互。首先，我们需要声明我们的流的转换，然后我们需要启动。
+
+#### <span id="create-a-query">创建一个查询</span>
+
+什么是流行的URL?在什么时间内?现在我们有了对网络日志流的实时分析访问，我们不需要等待一天或一个月(对于这些NASA的网络日志来说，等待超过20年)来获得流行URL的排名。我们可以在更短的时间内获得这些信息。
+
+首先，为了定义我们感兴趣的时间段，我们创建一个时间窗口。`Structured Streaming`的一个有趣特性是，我们可以基于数据产生的时间(也称为事件时间)，而不是数据被处理的时间创建窗口。
+
+我们的窗口定义是5分钟的事件数据。考虑到我们的时间线是模拟的，这五分钟可能比时钟时间快或慢得多。通过这种方式，我们可以清楚地了解`Structured Streaming`是如何使用事件时间来跟踪事件时间轴的。
+
+正如我们从批量分析中学到的，我们应该提取url并只选择内容页面，如.html、.htm或目录。让我们先应用所获得的知识，然后再定义窗口查询：
+
+```
+// A regex expression to extract the accessed URL from weblog.request
+val urlExtractor = """^GET (.+) HTTP/\d.\d""".r
+val allowedExtensions = Set(".html", ".htm", "")
+val contentPageLogs:String => Boolean = url => {
+    val ext = url.takeRight(5).dropWhile(c => c != '.')
+    allowedExtensions.contains(ext)
+}
+
+val urlWebLogStream = webLogStream.flatMap { weblog => 
+    weblog.requestmatch {
+        case urlExtractor(url) if (contentPageLogs(url)) => 
+            Some(weblog.copy(request= url))
+        case _ => None
+    }
+}
+```
+
+我们已经将请求转换为只包含访问过的URL，并过滤掉了所有非内容页面。现在，我们定义窗口查询来计算最热门的URL。
+
+```
+val rankingURLStream = urlWebLogStream
+.groupBy($"request", window($"timestamp", "5 minutes", "1 minute"))
+.count
+```
+
+#### <span id="start-stream-process">启动流处理</span>
+
+到目前为止，我们遵循的所有步骤都是定义流将经历的流程。但是还没有数据被处理过。
+
+要启动`Structured Streaming`作业，需要指定接收器和输出模式。
+
+这是`Structured Streaming`引入的两个新概念:
+
+- 接收器定义了我们想在哪里物化结果数据;例如，文件系统，内存表，或另一个流系统，如Kafka。
+- 输出模式定义了我们希望结果如何被交付:我们希望每次都看到所有数据，只更新，还是只看到新记录?
+
+这些选项提供给`writeStream`。它创建流查询，该查询启动流消费，执行在查询上声明的计算，并将结果生成到输出接收器。
+
+稍后我们将详细讨论所有这些概念。现在，让我们根据经验来使用它们并观察结果。
+
+对于示例7-1所示的查询，每次向跟踪URL排名的结果中添加新记录时，我们使用`memory sink`和输出模式complete来拥有一个完全更新的表。
+
+示例7-1。将流写入接收器
+
+```
+val query = rankingURLStream.writeStream
+.queryName("urlranks")
+.outputMode("complete")
+.format("memory")
+.start()
+```
+
+内存接收器将数据输出到queryName选项中给定的同名临时表。我们可以通过查询`Spark SQL`上注册的表来观察这一点。
+
+```
+scala> spark.sql("show tables").show()
++--------+---------+-----------+
+|database|tableName|isTemporary|
++--------+---------+-----------+
+|        | urlranks|       true|
++--------+---------+-----------+
+```
+
+在示例7-1的表达式中，查询的类型是StreamingQuery，它是一个控制查询生命周期的处理程序。
+
+#### <span id="exploring-data">探索数据</span>
+
+考虑到我们在不断生成日志，几秒之后，我们可以执行下一个命令来查看第一个窗口的结果，如图7-1所示。
+
+注意处理时间(几秒)是如何从事件时间(几十分钟的日志)中分离出来的。
+
+```
+urlRanks.select($"request", $"window", $"count").orderBy(desc("count"))
+```
+
+![figure7-1](./img/figure-7-1.png)
+
+我们将在第12章详细探讨事件时间。
+
+### <span id="chapter-7-summary">总结</span>
+
+在`Structured Streaming`的最初步骤中，您已经看到了流应用程序开发背后的过程。通过以批处理版本的过程开始，你获得了对数据的直觉，并利用这些洞察力，我们创建了工作的流处理版本。在这个过程中，你可以体会到批处理和流api是多么的接近，我们也观察到一些通常的批处理操作现在应用在流上下文中。
+
+通过这个练习，我们希望能增加您对`Structured Streaming`的好奇心。现在您已经准备好开始进一步的学习。
 
 <div STYLE ="page-break-after：always;"> </div>
