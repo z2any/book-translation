@@ -32,7 +32,21 @@
       - [启动流处理](#start-stream-process)
       - [探索数据](#exploring-data)
     - [总结](#chapter-7-summary)
-
+  - [第8章 Structured Streaming编程模型](#chapter-8)
+    - [初始化Spark](#initializing-spark)
+    - [数据源](#acquiring-streaming-data)
+      - [可用数据源](#available-sources)
+    - [转换数据源](#transforming-streaming-data)
+      - [DataFrame API在流处理中的限制](#streaming-api-restrction-on-dataframe-api)
+    - [接收器：输出数据](#sink-output-the-resulting-data)
+      - [format](#format)
+      - [输出模式](#output-mode)
+      - [queryName](#query-name)
+      - [option](#option)
+      - [options](#options)
+      - [trigger](#trigger)
+      - [start](#start)
+    - [总结](#chapter-8-summary)
 
 # <span id="part-1">第1部分 使用Apache Spark进行流处理的基础知识</span>
 
@@ -401,7 +415,7 @@ Tyler Akidau在他的`Streaming Systems`一书中对无限数据的定义如下�
 我们将通过一个实际的示例来开始我们的旅程，该示例将帮助您建立模型。从这里开始，我们研究API并深入到流处理的以下方面的细节：
 
 - 使用数据源消费数据
-- 使用`Dataframe`/`Dataset` API构建数据处理逻辑
+- 使用`DataFrame`/`Dataset` API构建数据处理逻辑
 - 了解和处理事件时间
 - 处理流式应用程序中的状态
 - 了解任意状态转换
@@ -748,5 +762,303 @@ urlRanks.select($"request", $"window", $"count").orderBy(desc("count"))
 在`Structured Streaming`的最初步骤中，您已经看到了流应用程序开发背后的过程。通过以批处理版本的过程开始，我们了解了数据处理流程，并创建了流处理版本。在这个过程中，你可以体会到批处理和流api是多么的接近，我们也观察到一些通常的批处理操作现在应用在流上下文中。
 
 通过这个练习，我们希望能增加您对`Structured Streaming`的好奇心。现在您已经准备好开始进一步的学习。
+
+<div STYLE ="page-break-after：always;"> </div>
+
+
+
+## <span id="chapter-8">第8章 Structured Streaming编程模型</span>
+
+`Structured Streaming`构建在Spark SQL `DataFrame`和`Dataset` API之上。通过扩展这些API，`Structured Streaming`继承了Spark SQL引入的高级语言的特性以及底层优化，包括Catalyst查询优化器的使用以及Tungsten项目提供的低开销内存管理和代码生成。同时，`Structured Streaming`可以用在所有支持Spark SQL的语言中。像Scala，Java、Python和R，尽管一些高级特性目前仅在Scala中可用。由于Spark SQL中使用了中间查询表示，所以无论使用何种语言，程序的性能都是相同的。
+
+`Structured Streaming`引入了对事件时间的支持，这使得很容易使用事件时间进行编程。
+
+随着`Structured Streaming`的发展，Spark将经典批处理和流处理统一起来。
+
+在本章中，我们通过遵循在`Structured Streaming`中创建流作业通常需要的一系列步骤来研究`Structured Streaming`的编程模型：
+
+- 初始化Spark
+- 数据源：获取流数据
+- 声明应用在流数据上的操作
+- 接收器：输出结果数据
+
+
+### <span id="initializing-spark">初始化Spark</span>
+
+Spark API统一的一部分是，`SparkSession`成为批处理和使用`Structured Streaming`进行流处理的统一入口点。
+
+因此，我们创建Spark作业的入口点与使用Spark批处理API时相同:我们实例化一个SparkSession，如示例8-1所示
+
+```
+importorg.apache.spark.sql.SparkSession
+val spark = SparkSession.builder().appName("StreamProcessing").master("local[*]").getOrCreate()
+```
+
+### <span id="acquiring-streaming-data">数据源</span>
+
+在`Structured Streaming`中，数据源是一种抽象，它允许我们从流数据生成器中消费数据。数据源不是直接创建的。相反，`SparkSession`提供了一个方法`readStream`，该方法来指定数据源的格式，并提供相关配置。
+
+例如，例8-2中的代码创建了一个File流源。我们使用`format`方法指定源文件的格式。`schema`方法允许我们为数据流提供一个模式，这对于某些源类型是必需的，比如File源。
+
+```
+val fileStream = spark.readStream
+.format("json")
+.schema(schema)
+.option("mode","DROPMALFORMED")
+.load("/tmp/datasrc")
+
+>fileStream:org.apache.spark.sql.DataFrame = [id:string, timestamp:timestamp... ]
+```
+
+
+每个数据源都有不同的选项。在例8-2中，我们将选项模式设置为`DROPMALFORMED`。这个选项指示JSON流处理器删除任何既不符合JSON格式也不匹配提供的模式的行。
+
+`readStream`创建一个`DataStreamBuilder`实例。这个实例负责管理不同选项。在这个`DataStreamBuilder`示例上调用`load(…)`将验证提供给构建器的选项，如果一切都检查好了，它将返回一个`DataFrame`。
+
+- read/write：批处理
+- readStream/writeStream：流处理
+
+在我们的示例中，`DataFrame`表示数据流，Spark监视所提供的路径，将该路径中的每个新文件视作json编码，并使用所提供的模式进行解析。所有不符合的数据都将从这个数据流中删除。
+
+加载数据源是惰性的。我们得到的是一个流的表示，在`DataFrame`上，我们可以使用一系列转换，以实现我们特定的业务逻辑。创建`DataFrame`不会导致任何数据被实际消费或处理。我们将使用一个查询来代表计算。
+
+
+#### <span id="available-sources">可用数据源</span>
+
+从Spark v2.4.0起，支持以下流源：
+
+- `json, orc, parquet, csv, text, textfile`
+
+    这些都是基于文件的数据源。基本功能是监控文件系统中的路径(文件夹)，并自动使用其中的文件。找到的文件将由指定的格式化程序解析。例如，如果提供了json, Spark json reader将使用提供的schema来处理文件。
+
+- `socket`
+
+    通过TCP连接连到服务器获取数据。
+
+- `kafka`
+
+    创建Kafka消费者以从Kafka检索数据。
+
+- `rate`
+
+    按照rowsPerSecond选项给出的速率生成行流。它主要用作测试。
+
+将在第10章看到更详细的内容。
+
+### <span id="transforming-streaming-data">转换数据源</span>
+
+正如我们在前一节中看到的，调用load的结果是一个`DataFrame`。在我们创建`DataFrame`之后，我们可以使用`Dataset`或`DataFrame` API来表达我们想要应用到流数据的逻辑，以实现我们业务逻辑。
+
+```
+记住，DataFrame是Dataset[Row]的别名。虽然这看起来像是一个很小的技术区别，但当从Scala这样的类型化语言中使用时，Dataset API提供了一个类型化接口，而DataFrame使用是无类型化的。当从动态语言(如Python)中使用结构化API时，DataFrame API是唯一可用的API。
+
+在类型化Dataset上使用操作也会影响性能。尽管查询规划器可以理解和进一步优化DataFrame API使用的SQL表达式，但Dataset操作中提供的闭包对查询规划器是不透明的，因此可能比对应的DataFrame运行得慢。
+```
+
+假设我们使用来自传感器网络的数据，在例8-3中，我们从sensorStream中选择deviceId、timestamp、sensorType和value字段，并保留那些传感器类型为温度且其值高于给定阈值的记录。
+
+```
+val highTempSensors = sensorStream
+.select($"deviceId", $"timestamp", $"sensorType", $"value")
+.where($"sensorType" === "temperature" && $"value" > threshold)
+```
+
+同样，我们可以随着时间的推移聚合数据并对组应用操作。例8-4表明，我们可以使用事件时间来定义一个5分钟的时间窗口，该窗口将每分钟滑动一次。我们将在第12章详细讨论事件时间。这里需要掌握的重要一点是，`Structured Streaming` API与批处理的Dataset API相同，但流处理有一些特别的限制。
+
+```
+val avgBySensorTypeOverTime = sensorStream
+.select($"timestamp", $"sensorType", $"value")
+.groupBy(window($"timestamp", "5 minutes", "1 minute"), $"sensorType")
+.agg(avg($"value"))
+```
+
+如果您不熟悉Spark API，我们建议您熟悉它。对这个API的详细讨论超出了本书的范围。我们推荐Bill Chambers和MateiZaharia的《Spark: The Definitive Guide》(O 'Reilly, 2018)。
+
+#### <span id="streaming-api-restrction-on-dataframe-api">DataFrame API在流处理中的限制</span>
+
+正如我们在前一章中提到的，标准的`DataFrame`和`Dataset` API提供的一些操作在流处理中没有意义。
+
+例如`stream.count`，在流处理中使用是没有意义的。一般来说，要求底层数据集立即的操作是不允许的。以下是流处理不直接支持的API操作：
+
+- count
+- show
+- decribe
+- limit
+- take(n)
+- distinct
+- foreach
+- sort
+- multiple stacked aggregations
+
+除了这些操作，流和流连接和静态数据和流的连接也只是部分支持。
+
+##### 理解的局限性
+
+尽管有些操作(如count或limit)在流处理中没有意义，但其他一些流操作在计算上是困难的。例如，distinct就是其中之一。要过滤任意数据流中的重复数据，就需要你记住到目前为止看到的所有数据，并将每个新记录与所有已经看到的记录进行比较。第一种情况需要无限的内存，第二种情况的计算复杂度为O(n2)，随着元素数量(n)的增加，计算复杂度变得难以实现。
+
+##### 已聚合流上的操作
+
+在将聚合函数应用于流之后，一些不受支持的操作将被定义。虽然我们不能对流进行计数，但我们可以计算每分钟接收的消息数或计算某种类型的设备的数量。
+
+在例8-5中，我们定义了每分钟每个sensorType的事件数
+
+```
+val avgBySensorTypeOverTime = sensorStream
+.select($"timestamp", $"sensorType")
+.groupBy(window($"timestamp", "1 minutes", "1 minute"), $"sensorType")
+.count()
+```
+
+同样，也可以对已聚合的数据定义排序，尽管它会进一步限制输出模式。
+
+##### 重复数据删除
+
+我们讨论过，在任意流上实现distinct在计算上是困难的。但是如果我们可以定义一个键来告诉我们数据已达到，我们可以用它来删除重复数据：
+
+```
+stream.dropDuplicates("<key-column>") ...
+```
+
+##### Workarounds
+
+虽然有些操作不支持与批处理模型中完全相同的方式，但有其他方法可以实现相同的功能:
+
+- foreach
+
+    虽然不能直接在流上使用foreach，但有一个foreach接收器提供了相同的功能。
+    
+    接收器在输出定义中指定。
+
+- show
+
+    虽然show需要查询的立刻计算，因此在流处理中的`Dataset`上是不可能的，但我们可以使用控制台接收器将数据输出到屏幕。
+
+
+### <span id="sink-output-the-resulting-data">接收器：输出数据</span>
+
+到目前为止，我们所做的所有操作(比如创建流和在流上应用转换)都是声明性的。它们定义了从哪里使用数据，以及我们想对数据应用什么操作。但到目前为止，系统中仍然没有数据流动。
+
+在我们可以初始化流之前，我们需要首先定义输出数据的位置和方式：
+
+- Where：与接收器有关，我们流数据的接收端
+- How：指的是输出模式，如何处理流中的结果记录
+
+从API的角度来看，我们通过在流式`DataFrame`或`Dataset`上调用`writeStream`来实现流输出，如例8-6所示。调用`writeStream`将创建一个`DataStreamWriter`。这是一个构建器实例，它提供了一些方法来配置我们的流处理的输出行为：
+
+```
+val query = stream.writeStream
+.format("json")
+.queryName("json-writer")
+.outputMode("append")
+.option("path", "/target/dir")
+.option("checkpointLocation", "/checkpoint/dir")
+.trigger(ProcessingTime("5 seconds"))
+.start()
+
+>query:org.apache.spark.sql.streaming.StreamingQuery = ...
+```
+
+我们将在第11章详细讨论接收器。
+
+#### <span id="format">format</span>
+
+format方法允许我们通过提供内置接收器的名称或自定义接收器的完全限定名称来指定输出接收器。
+
+从Spark v2.4.0起，有以下流接收器可用
+
+- console sink
+
+    打印到标准输出的接收器。可以用选项numRows配置显示多少行。
+
+- file sink
+
+    将结果写入文件系统，基于特定的文件格式。通过提供格式名称来指定:csv, hive, json, orc, parquet,avro或text。
+
+- kafka sink
+
+    将数据写入一个或多个Kafka主题。
+
+- memory sink
+
+    使用查询名作为表名创建内存中的表。结果会不断更新这个表。
+
+- foreach sink
+
+    提供一个可编程接口来访问流内容，一次访问一个元素。
+
+- foreachBatch sink
+
+    foreachBatch提供了对完整的`DataFrame`的访问，这些`DataFrame`对应于`Structured Streaming`执行的每个底层微批处理。
+
+
+#### <span id="output-mode">输出模式</span>
+
+outputMode指定如何将记录添加到流输出中。支持的模式为append、update和complete。
+
+- append
+
+    (默认模式)仅将最终记录添加到输出流。当输入流中没有新的记录可以修改它的值时，记录被认为是最终的。通常用于线性变换的情况，比如那些应用投影、过滤和映射的结果。这种模式保证每个结果记录只输出一次。
+
+- update
+
+    将自最后一个触发器以来的新记录和更新记录添加到输出流。update只有在聚合上下文中才有意义，在聚合上下文中，聚合值随着新记录的到达而变化。如果多个输入记录更改了一个结果，那么触发器间隔之间的所有更改都会被整理到一个输出记录中。
+
+- complete
+
+    complete模式输出流的完整内部表示。这种模式也与聚合有关，因为对于非聚合流，我们需要记住到目前为止看到的所有记录，这是不现实的。从实用的角度来看，只有当你在低基数标准上聚集价值时，才推荐完整模式，比如按国家计算的游客数量，我们知道国家的数量是有限的。
+
+##### 理解append
+
+当流查询包含聚合时，final的定义就不那么简单了。在聚合计算中，当新的传入记录符合所使用的聚合标准时，可能会更改现有的聚合值。按照我们的定义，我们不能使用append输出一个记录，直到我们知道它的值是final。因此，结合聚合查询使用append输出模式仅限于使用事件时间表示聚合并定义水位线的查询。在这种情况下，一旦水位线过期，append将输出一个事件，因此认为没有新的记录会占用聚合的值。因此，append模式下的输出事件将被聚合时间窗加上水位线偏移量延迟。
+
+#### <span id="query-name">queryName</span>
+
+通过queryName，我们可以为一些基于接收器的查询提供一个名称，并且在Spark Console的工作描述中也显示了该名称，如图8-1所示
+
+![figure8-1](./img/figure-8-1.png)
+
+#### <span id="option">option</span>
+
+通过option方法，我们可以用键值对的方式提供配置，类似于数据源的配置。每个接收器都可以有自己特定的配置。
+
+#### <span id="options">options</span>
+
+options是一种设置选项的方式，接受一个`Map[String, String]`，包含我们想要设置的所有配置参数。
+
+#### <span id="trigger">trigger</span>
+
+trigger是可选，允许我们指定生成结果的频率。默认情况下，`Structured Streaming`会尽快处理输入并产生结果。当指定一个触发器时，在每个触发器间隔将产生输出。
+
+`org.apache.spark.sql.streaming.Trigger` 提供了3种trigger：
+
+- `ProcessingTime(<interval>)`
+
+    指定一个时间间隔来触发。
+
+- `Once()`
+
+    一个特定的触发器，允许我们执行一次流作业。它对于测试和流作业作为单次批处理操作都很有用。
+
+- `Continuous(<checkpoint-interval>)`
+
+    此触发器将执行引擎切换为连续处理引擎，以进行低延迟处理。`checkpoint-interval`指定了异步检查点的频率。它不应该与ProcessingTime触发器的间隔混淆。我们将在第十五章探讨这个新的执行选项。
+
+#### <span id="start">start</span>
+
+为了实现流计算，我们需要启动流处理。最后，start()将完整的作业描述物化为流计算，并启动内部调度进程，数据从源端被消耗、处理和产生到接收器。start()返回一个StreamingQuery对象，它是一个句柄，用于管理每个查询的单个生命周期。这意味着我们可以在同一个sparkSession中同时独立地启动和停止多个查询。
+
+
+### <span id="chapter-8-summary">总结</span>
+
+阅读本章后，您应该对`Structured Streaming`编程模型和API有一个很好的理解。在本章中，你学习了以下内容:
+
+- 每个流都从定义一个数据源开始。
+- 我们可以重用大多数熟悉的`Dataset`和`DataFrame` API来转换流数据。
+- 一些来自批处理API的常见操作在流模式下没有意义。
+- 通过定义接收器来定义流输出。
+- 流的输出模式和聚合操作之间的关系。
+- 所有的转换都是惰性的，我们需要启动我们的流来获得通过系统的数据流。
+
+在下一章中，你将应用你新获得的知识来创建一个综合的流处理程序。在那之后，我们将放大到`Structured Streaming` API的特定领域，如事件时间处理、窗口定义、水位线的概念和任意状态处理。
 
 <div STYLE ="page-break-after：always;"> </div>
