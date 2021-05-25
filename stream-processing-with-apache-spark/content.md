@@ -47,6 +47,11 @@
       - [trigger](#trigger)
       - [start](#start)
     - [总结](#chapter-8-summary)
+  - [第9章 Structured Streaming实战](#chapter-9)
+    - [消费数据源](#consuming-streaming-data)
+    - [业务逻辑](#application-logic)
+    - [写入数据到接收器](#writing-to-streaming-sink)
+    - [总结](#chapter-9-summary)
 
 # <span id="part-1">第1部分 使用Apache Spark进行流处理的基础知识</span>
 
@@ -62,7 +67,7 @@
 
 有了这些新知识，我们准备使用Spark的两个流API，我们将在本书的后续部分中进行介绍。
 
-<div STYLE ="page-break-after：always;"> </div>
+<div style ="page-break-after：always;"> </div>
 
 ## <span id="chapter-1">第1章 流处理简介</span>
 
@@ -314,7 +319,7 @@ Tyler Akidau在他的`Streaming Systems`一书中对无限数据的定义如下�
 
 如果你想马上学习这两个api中的任何一个，你可以直接跳到第二部分的`Structured Streaming`或者第三部分的`Spark Streaming`。如果您不熟悉流处理，我们建议您继续阅读本书的第一部分，因为我们将构建讨论特定框架时使用的词汇表和公共概念。
 
-<div STYLE ="page-break-after：always;"> </div>
+<div style ="page-break-after：always;"> </div>
 
 ## <span id="chapter-2">第2章 流处理模型</span>
 
@@ -406,7 +411,7 @@ Tyler Akidau在他的`Streaming Systems`一书中对无限数据的定义如下�
 
 ## <span id="chapter-3">第3章 流式架构</span>
 
-<div STYLE ="page-break-after：always;"> </div>
+<div style ="page-break-after：always;"> </div>
 
 # <span id="part-2">Structured Streaming</span>
 
@@ -763,7 +768,7 @@ urlRanks.select($"request", $"window", $"count").orderBy(desc("count"))
 
 通过这个练习，我们希望能增加您对`Structured Streaming`的好奇心。现在您已经准备好开始进一步的学习。
 
-<div STYLE ="page-break-after：always;"> </div>
+<div style ="page-break-after：always;"> </div>
 
 
 
@@ -1061,4 +1066,193 @@ trigger是可选，允许我们指定生成结果的频率。默认情况下，`
 
 在下一章中，你将应用你新获得的知识来创建一个综合的流处理程序。在那之后，我们将放大到`Structured Streaming` API的特定领域，如事件时间处理、窗口定义、水位线的概念和任意状态处理。
 
-<div STYLE ="page-break-after：always;"> </div>
+<div style ="page-break-after：always;"> </div>
+
+## <span id="chapter-9">第9章 Structured Streaming实战</span>
+
+现在我们对`Structured Streaming` API和编程模型有了更好的理解，在本章中，我们将创建一个小型但完整的物联网(IoT)的流处理程序。
+
+```
+在线资源
+
+对于本例，我们将使用在线资源中的Structured-Streaming-in-action，该资源位于https://github.com/stream-processing-with-spark
+```
+
+我们的用例将使用`Apache Kafka`作为数据源。
+
+我们将传入的物联网传感器数据与静态配置文件关联，该文件包含所有已知传感器及其配置数据。这样，我们就可以用特定传感器参数来丰富每一个输入记录。然后，我们将所有正确处理过的记录保存为Parquet格式的文件。
+
+```
+Apache Kafka
+
+Apache Kafka是最受欢迎的消息代理之一，用于在事件驱动系统中分离生产者和消费者。它是一个高度可扩展的分布式流媒体平台。它提供了类似于消息队列或企业消息系统的功能，但在三个重要方面有别于其他系统:
+
+1. 运行在商用集群上，使其具有高度可扩展性。
+2. 数据容错存储，保证数据接收和发送的一致性。
+3. 基于Pull模式的消费者可以以不同的时间和速度消费数据，从实时、微批处理到批量处理，具有广泛的应用。
+
+你可以在 http://kafka.apache.org 上找到Kafka
+```
+
+### <span id="consuming-streaming-data">消费数据源</span>
+
+我们程序的第一部分是创建流数据集：
+
+```
+val rawData = sparkSession.readStream
+.format("kafka")
+.option("kafka.bootstrap.servers", kafkaBootstrapServer)
+.option("subscribe", topic)
+.option("startingOffsets", "earliest")
+.load()
+
+> rawData:org.apache.spark.sql.DataFrame
+```
+
+`Structured Streaming`的入口点是一个已经存在的Spark Session (sparkSession)。正如你在第一行所理解的，流数据集的创建几乎等同于静态数据集的创建。`sparkSession.readStream`返回`DataStreamReader`，一个实现构建器模式的类，该模式使用流式API收集构建数据源所需的信息。在这个API中，我们通过`format`指定数据源，在我们的例子中，就是kafka。它后面的选项是特定于这个数据源的。
+
+- `kafka.bootstrap.servers`
+
+    指定引导服务器地址，以逗号分隔的 `host:port`。
+
+- `subscribe`
+
+    指定订阅的一个或多个主题。
+
+- `startingOffsets`
+
+    当应用程序开始时的偏移量重置策略。
+
+我们将在第十章中详细介绍Kafka作为数据源。
+
+`load()`方法对`DataStreamReader`构建器进行评估，并创建一个`DataFrame`作为结果：
+
+```
+> rawData:org.apache.spark.sql.DataFrame
+```
+
+`DataFrame`是`Dataset[Row]`的别名。创建后，您可以像使用`Dataset`一样使用它。这使得在`Structured Streaming`中使用成熟的`Dataset` API成为可能，尽管有些例外，因为不是所有的操作，如show()或count()，在流上下文中都有意义。
+
+要以编程方式区分流数据集和静态数据集，我们可以询问数据集是否属于流类型：
+
+```
+rawData.isStreaming
+res7:Boolean = true
+```
+
+我们还可以使用现有的`Dataset` API来查看模式，如示例9-1所示
+
+```
+rawData.printSchema()
+
+root
+  |-- key:binary (nullable = true)
+  |-- value:binary (nullable = true) 
+  |-- topic:string (nullable = true)
+  |-- partition:integer (nullable = true)
+  |-- offset:long (nullable = true)
+  |-- timestamp:timestamp (nullable = true)
+  |-- timestampType:integer (nullable = true)
+```
+
+通常，`Structured Streaming`需要显式声明模式。在kafka的特定情况下，产生的`Dataset`的模式是固定的，并且独立于流的内容。它由一组特定于Kakfa源的字段组成:键、值、主题、分区、偏移量、时间戳和timestamp类型，我们可以在示例9-1中看到。在大多数情况下，应用程序最感兴趣的是流的实际数据所在的值字段的内容。
+
+
+### <span id="application-logic">业务逻辑</span>
+
+回想一下，我们工作的目的是将传入的物联网传感器数据与包含所有已知传感器及其配置数据关联起来。这样，我们就可以用特定的传感器参数来丰富每个输入的记录，这样我们就可以解释报告的数据。然后我们将所有正确处理过的记录保存到一个Parquet文件中。来自未知传感器的数据将被保存到一个独立文件中，以供以后分析。
+
+```
+val iotData = rawData.select($"value").as[String].flatMap {record =>
+    val fields= record.split(",")
+    Try {
+        SensorData(fields(0).toInt, fields(1).toLong, fields(2).toDouble)
+    }.toOption
+}
+    
+val sensorRef = sparkSession.read.parquet(s"$workDir/$referenceFile")
+sensorRef.cache()
+val sensorWithInfo = sensorRef.join(iotData, Seq("sensorId"), "inner")
+val knownSensors = sensorWithInfo
+.withColumn("dnvalue", $"value"*($"maxRange"-$"minRange")+$"minRange")
+.drop("value", "maxRange", "minRange")
+```
+
+在第一步中，我们将csv格式的记录转换回SensorData。我们对`Dataset[String]`应用Scala函数操作，该数据集是我们从字符串中提取值字段获得的。
+
+然后，我们使用流数据集连接静态数据集，使用sensorId作为键将传感器及配置数据关联起来。
+
+为了完成我们的应用程序，我们使用配置数据中的最小-最大范围来计算传感器读数的真实值。
+
+
+### <span id="writing-to-streaming-sink">写入数据到接收器</span>
+
+应用程序的最后一步是将处理过的物联网数据写入parquet格式的文件。在`Structured Streaming`中，写操作是至关重要的:它标志着转换完成，定义了一个写模式，并且在调用start()时，开始连续的查询。
+
+在`Structured Streaming`中，所有的操作都是我们想要对流数据做什么的惰性声明。只有当我们调用start()时，流才会开始消费数据，对数据的查询操作才会变成实际的结果。
+
+```
+val knownSensorsQuery = knownSensors.writeStream
+.outputMode("append")
+.format("parquet")
+.option("path", targetPath)
+.option("checkpointLocation", "/tmp/checkpoint")
+.start()
+```
+
+让我们拆解一下：
+
+- `writeStream`创建了一个构建器对象，我们可以配置写操作的选项。
+- 使用`format`，我们指定下游接收器。在我们的例子中，我们使用内置的带有Parquet格式的`FileStreamSink`。
+- 输出模式是`Structured Streaming`中的一个新概念:从理论上讲，我们可以访问到目前为止在流中看到的所有数据，我们也可以选择生成该数据的不同视图。
+- 这里使用的append模式，意味着被我们的流计算影响的新记录被产生到输出。
+
+start调用的结果是一个`StreamingQuery`实例。该对象提供一个方法来控制流查询的执行，并查询正在运行的流查询的状态信息，如例9-2所示
+
+```
+knownSensorsQuery.recentProgress
+
+res37:Array[org.apache.spark.sql.streaming.StreamingQueryProgress] =
+Array({
+    "id" : "6b9fe3eb-7749-4294-b3e7-2561f1e840b6",
+    "runId": "0d8d5605-bf78-4169-8cfe-98311fc8365c",
+    "name":null,
+    "timestamp": "2017-08-10T16:20:00.065Z",
+    "numInputRows": 4348,
+    "inputRowsPerSecond": 395272.7272727273,
+    "processedRowsPerSecond": 28986.666666666668,
+    "durationMs": {
+        "addBatch" : 127,
+        "getBatch" : 3,
+        "getOffset": 1,
+        "queryPlanning": 7,
+        "triggerExecution": 150,
+        "walCommit": 11 
+    },
+    "stateOperators": [],
+    "sources": [ {
+        "description" : "KafkaSource[Subscribe[iot-data]]", 
+        "startOffset": {
+            "iot-data" : {
+                "0" : 19048348
+            }
+        }, 
+        "endOffset": {
+            "iot-data" : {
+                "0" : 19052696
+            }
+        },    
+        "numInputRow...
+```
+
+在例9-2中，我们可以看到调用`knownSensorsQuery.recentProgress`的结果是`StreamingQueryProgress`。如果我们看到`numInputRows`是非零值，我们可以确定我们的作业正在消费数据。我们现在有了一个正确运行的`Structured Streaming`作业。
+
+
+### <span id="chapter-9-summary">总结</span>
+
+希望这一章已经向你展示了如何使用`Structured Streaming`创建你的第一个应用程序。
+
+阅读本章之后，你应该对`Structured Streaming`应用程序的结构有一个更好的理解，以及如何处理流式应用程序，从消费数据，使用`Dataset`和`DataFrame` API处理它，到产生数据到外部输出。此时，您应该已经准备好开始创建自己的流处理作业了。在下一章中，您将深入学习结`Structured Streaming`的不同方面。
+
+
+<div style ="page-break-after：always;"> </div>
