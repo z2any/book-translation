@@ -52,6 +52,20 @@
     - [业务逻辑](#application-logic)
     - [写入数据到接收器](#writing-to-streaming-sink)
     - [总结](#chapter-9-summary)
+  - [第10章 Structured Streaming数据源](#chapter-10)
+    - [理解数据源](#understanding-source)
+      - [可靠的数据源必须是可重放的](#reliable-source-must-be-replayable)
+      - [数据源必须提供模式](#source-must-provide-schema)
+    - [可用数据源](#available-sources-chapter-10)
+    - [file数据源](#file-source)
+    - [kafka数据源](#kafka-source)
+    - [socket数据源](#socket-source)
+    - [rate数据源](#rate-source)
+  - [第11章 Structured Streaming接收器](#chapter-11)
+  - [第12章 基于事件时间的流处理](#chapter-12)
+  - [第13章 高级状态处理](#chapter-13)
+  - [第14章 监控Structured Streaming应用程序](#chapter-14)
+  - [第15章 实验性特性：连续处理和机器学习](#chapter-15)
 
 # <span id="part-1">第1部分 使用Apache Spark进行流处理的基础知识</span>
 
@@ -1254,5 +1268,658 @@ Array({
 
 阅读本章之后，你应该对`Structured Streaming`应用程序的结构有一个更好的理解，以及如何处理流式应用程序，从消费数据，使用`Dataset`和`DataFrame` API处理它，到产生数据到外部输出。此时，您应该已经准备好开始创建自己的流处理作业了。在下一章中，您将深入学习结`Structured Streaming`的不同方面。
 
+
+<div style ="page-break-after：always;"> </div>
+
+
+## <span id="chapter-10">第10章 Structured Streaming数据源</span>
+
+前面的章节很好地概述了`Structured Streaming`编程模型，以及如何在实际中应用它。在本章中，我们研究数据源的一般特性，并详细地回顾现有的数据源，包括它们的不同配置选项和操作模式。
+
+### <span id="understanding-source">理解数据源</span>
+
+在`Structured Streaming`中，数据源表示的是流数据提供者的抽象。数据源接口背后的概念是，流数据是一段时间内事件的连续流，可以被视为一个序列，用单调增量计数器进行索引。
+
+图10-1说明了如何将流中的每个事件视为不断增加的偏移量。
+
+![figure10-1](./img/figure-10-1.png)
+
+如图10-2所示，偏移量用于从外部源请求数据，并指示哪些数据已经被使用。`Structured Streaming`通过询问来自外部系统的当前偏移量并将其与最后处理的偏移量进行比较，从而知道什么时候有数据需要处理。要处理的数据是通过获得起始和结束两个偏移量之间的一批数据来请求的。通过提交给定的偏移量，数据源被告知数据已被处理。数据源保证所有偏移量小于或等于已提交偏移量的数据都已被处理，后续请求将只处理大于已提交偏移量的数据。有了这些保证，数据源可能会选择放弃已处理的数据以释放系统资源。
+
+![figure10-2](./img/figure-10-2.png)
+
+让我们仔细看看图10-2中所示的基于偏移量的处理：
+
+1. 在t1，系统调用getOffset并获取源的当前偏移量。
+2. 在t2，系统通过调用getBatch(start, end)来获取一批数据。注意，在此期间可能已经有了新的数据。
+3. 在t3，系统提交偏移量，源删除相应的记录。
+
+这一过程不断重复，确保了流数据的获取。为了从最终的故障中恢复，偏移量通常被检查点指向外部存储。
+
+除了基于偏移量的交互，数据源必须满足两个要求:
+
+- 为了可靠，数据源必须以相同的顺序重放
+- 数据源必须提供一种模式
+
+
+#### <span id="reliable-source-must-be-replayable">可靠的数据源必须是可重放的</span>
+
+在`Structured Streaming`中，重放是指可以重新请求已经被请求但尚未提交的流数据的能力。就像我们可以重放因为分心而错过的netflix节目片段一样，数据源必须提供重放能力。这是通过调用getBatch来完成的，它带有我们想要再次接收的偏移量范围。
+
+如果一个数据源在`Structured Streaming`处理完全失败后未提交偏移量，那么这个数据源就被认为是可靠的。在故障恢复过程中，将从检查点恢复最后提交的偏移量，并再次从数据源请求偏移量。这需要流处理系统在外部安全地存储与数据源实现相关的数据。通过要求数据源的重放性，`Structured Streaming`将恢复责任委托给数据源。这意味着只有可靠的数据源才能使用`Structured Streaming`来创建强大的端到端交付保证。
+
+#### <span id="source-must-provide-schema">数据源必须提供模式</span>
+
+Spark的结构化API的一个定义特征是，它们依赖于模式信息来处理不同级别的数据。与处理不透明的字符串或字节数组blob不同，模式信息提供了数据的字段和类型信息。我们可以使用模式信息来驱动堆栈中不同级别的优化，从查询计划到数据二进制表示、存储以及访问。
+
+数据源必须提供描述其产生的数据的模式信息。有些数据源实现允许这个模式被配置，并使用这个配置信息自动解析传入的数据并将其转换为有效的记录。事实上，许多基于文件的数据源(如JSON或逗号分隔的CSV文件)都遵循这种模型，在这种模型中，用户必须提供文件格式使用的模式，以确保正确解析。其他一些数据源使用固定的内部模式，该模式表示每个记录的元数据信息，并将有效负载的解析留给应用程序。
+
+从体系结构的角度来看，创建基于模式的流应用程序是可取的，因为它有助于全面理解数据如何流经系统，并推动流管道不同阶段的规范化。
+
+##### 定义模式
+
+在`Structured Streaming`中，我们重用Spark SQL API来创建模式定义。我们可以使用几种不同的方法来定义模式——以编程方式、从case类定义推断或从现有数据集加载：
+
+- 编程
+
+    我们使用`StructType`和`StructField`来构建模式的表示。例如，要用id、类型和位置坐标表示被跟踪的车辆，我们可以构造如下所示的模式结构：
+
+    ```
+    import org.apache.spark.sql.{StructType, StructField}
+    import org.apache.spark.sql.types._
+
+    val schema = StructType(
+        List(
+            StructField("id", StringType, true),
+            StructField("type", StringType, true),
+            StructField("location", 
+            StructType(
+                List(
+                    StructField("latitude", DoubleType, false),
+                    StructField("longitude", DoubleType, false)
+                )
+            ), false)
+        )
+    )
+    ```
+
+    `StructField`可以包含嵌套的`StructType`，使得创建任意深度和复杂性的模式成为可能。
+
+- 推断
+
+    在Scala中，模式也可以用case类的任意组合来表示。给定单个case类或case类层次结构，可以通过为case类创建一个Encoder并从该编码器实例获取模式。
+
+    使用此方法，可以像这样获得前面示例中使用的相同模式定义：
+
+    ```
+    import org.apache.spark.sql.Encoders
+
+    // Define the case class hierarchy
+    case class Coordinates(latitude:Double, longitude:Double)
+    case class Vehicle(id:String, `type`:String, location:Coordinates )
+
+    // Obtain the Encoder, and the schema from the Encoder
+    val schema = Encoders.product[Vehicle].schema
+    ```
+
+- 从数据集获取
+
+    获取模式定义的一种方法是在文件中维护示例数据，如Parquet。为了获得我们的模式定义，我们加载样本数据集，并从加载的`DataFrame`获取模式定义。
+
+    ```
+    val sample = spark.read.parquet(<path-to-sample>)
+    val schema = sample.schema
+    ```
+
+编程方式功能强大，但需要付出努力，维护起来很复杂，经常会导致错误。加载数据集在原型阶段可能是实用的，但它需要保持样本数据集的最新，这在某些情况下可能会导致意外的复杂性。
+
+尽管不同的用例所选择的最佳方法可能不同，但一般来说，在使用Scala时，如果可能的话，我们倾向于使用推理方法。
+
+### <span id="available-sources-chapter-10">可用数据源</span>
+
+以下是目前在Spark `Structured Streaming`中可用的数据源：
+
+- file
+
+    存储为文件。支持的格式:JSON, CSV，Parquet，ORC和纯文本。
+
+- kafka
+
+    允许中kafka中消费数据。
+    
+- socket
+
+    通过tcp连接到服务器并使用基于文本的数据流。流必须用UTF-8字符集编码。
+
+- rate
+
+    以可配置的速率产生一个内部生成的(时间戳，值)记录流。这通常用于学习和测试。
+
+正如我们在“理解数据源”中所讨论的，当数据源提供重放的能力时，即使当`Structured Streaming`处理失败时，数据源也被认为是可靠的。使用这个标准，我们可以把可用的数据源分类如下：
+
+- 可靠
+
+    file，kafka
+
+- 不可靠
+
+    socket，rate
+
+在生产系统中，只有在允许数据丢失的情况下，才可以使用不可靠的数据源。
+
+```
+数据源API目前正在演变中。在撰写本文时，还没有稳定的公共API来开发定制数据源。这种情况预计在不久的将来会有所改变。
+```
+
+在本章的下一部分，我们将详细探讨当前可用的数据源。作为生产可用的数据源，file和kafka有很多选项，我们会详细讨论。socket和rate支持有限的功能，将简单介绍他们。
+
+
+### <span id="file-source">file数据源</span>
+
+file数据源是一个简单的数据源，它从文件系统中指定的目录中读取文件。基于文件的处理是将批处理与流系统连接起来的常用方法。批处理生成文件，并将其放在一个公共目录中，在该目录中，file数据源可以获取这些文件并将其内容转换为记录流，以便以流模式进行进一步处理。
+
+
+#### 指定format
+
+使用指定的格式读取文件，该格式由`readStream`构建器中的`.format()`方法提供，或者使用`DataStreamReader`中特定格式的专用方法。例如，`readStream.parquet(path)`。当使用特定格式的专用方法时，应该作为构造器的最后一次调用来执行。
+
+例如，例10-1中的三种形式是等价的
+
+```
+// Use format and load path
+val fileStream = spark.readStream
+.format("parquet")
+.schema(schema)
+.load("hdfs://data/exchange")
+
+// Use format and path options
+val fileStream = spark.readStream
+.format("parquet")
+.option("path", "hdfs://data/exchange")
+.schema(schema)
+.load()
+
+// Use dedicated method
+val fileStream = spark.readStream
+.schema(schema)
+.parquet("hdfs://data/exchange")
+```
+
+#### 通用选项
+
+不管具体的格式是什么，file数据源的一般功能是监控由特定URL标识的共享文件系统中的目录。所有file format都支持一组控制文件流入和定义文件过期标准的通用选项。
+
+```
+由于Apache Spark是一个快速发展的项目，api及其选项在未来的版本中可能会发生变化。此外，在本节中，我们只讨论适用于流处理的最相关选项。要获取最新的信息，请随时查看与您的Spark版本相对应的API文档。
+```
+
+file数据源的通用选项：
+
+- `maxFilesPerTrigger (Default: unset)`
+
+    指示每个查询触发器将消费多少文件。这个设置限制了每个触发器处理的文件数量，这样做有助于控制系统中的数据流入。
+
+- `latestFirst (Default: false)`
+
+    当此标志设置为true时，将首先选择较新的文件进行处理。当最新数据的优先级高于旧数据时，请使用此选项。
+
+- `maxFileAge (Default: 7 days)`
+
+    定义目录中文件的年龄阈值。超过阈值的文件将被忽略不处理。这个阈值保持是相对于目录中最新的文件，而不是系统时钟。例如，如果maxFileAge是2天，而最近的文件是从昨天开始，那么认为超过三天前的文件是超过阈值。类似于事件时间上的水位线。
+
+- `fileNameOnly (Default: false)`
+
+    当设置为true时，如果两个文件有相同的名称，则认为它们是相同的;否则，将考虑完整路径。
+
+```
+当将latestFirst设置为true并配置maxFilesPerTrigger时，maxFileAge将被忽略，因为可能存在这样一个条件，即有效的文件比阈值更老，因为系统将优先考虑最近的文件。在这种情况下，过期策略被忽略。
+```
+
+#### 常用文本解析选项 (CSV, JSON)
+
+一些文件格式，如CSV和JSON，使用可配置的解析器将每个文件中的文本数据转换为结构化记录。上游可能会创建不符合预期格式的记录。这些记录被认为已损坏。
+
+流处理系统的特点是连续运行。当接收到错误数据时，流处理程序不应该失败。根据业务需求，我们可以删除无效的记录，或者将被认为已损坏的数据路由到单独的错误处理流程中。
+
+##### 处理解析错误
+
+以下选项允许对解析器行为进行配置，以处理那些被认为已损坏的记录：
+
+- `mode (default PERMISSIVE)`
+
+    控制解析期间处理损坏记录的方式。允许的值是`PERMISSIVE`, `DROPMALFORMED`和`FAILFAST`。
+
+    - `PERMISSIVE`
+
+        已损坏记录被插入到特殊字段中，配置该字段的选项是`columnNameOfCorruptRecord`，在模式中必须存在，所有其他字段都设置为null。如果字段不存在，记录将被删除(与`DROPMALFORMED`行为相同)
+
+    - `DROPMALFORMED`
+
+        已损坏的记录被删除。
+
+    - `FAILFAST`
+
+        当发现损坏的记录时，将引发异常。这种方法不推荐在流处理中使用，因为未处理的异常可能会导致流处理失败并停止。
+
+- `columnNameOfCorruptRecord (default: “_corrupt_record”)`
+
+    配置用于包含损坏记录的字符串值的特殊字段。该字段也可以通过在Spark配置中设置`spark.sql.columnNameOfCorruptRecord`进行配置。如果同时设置了，则此选项优先。
+
+##### 模式推断
+
+- `inferSchema (default: false)`
+
+    不支持模式推理。此选项的设置将被忽略。提供schema是强制性的。
+
+
+##### 时间格式
+
+- `dateFormat (default: "yyyy-MM-dd")`
+
+    配置用于解析日期字段的模式。自定义模式应遵循`java.text.SimpleDateFormat`中定义的格式。
+
+- `timestampFormat (default: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX")`
+
+    配置用于解析时间戳字段的模式。自定义模式应遵循`java.text.SimpleDateFormat`中定义的格式。
+
+#### JSON文件格式
+
+JSON格式允许我们使用以JSON格式编码的文本文件，其中文件中的每一行都是一个有效的JSON对象。JSON记录使用提供的模式进行解析。不遵循模式的记录被认为是无效的，有几个选项可以控制无效记录的处理。
+
+##### JSON解析选项
+
+默认情况下，JSON文件数据源希望文件内容遵循JSON行规范。也就是说，文件中的每一行都对应一个符合指定模式的有效json文档。每一行应该用换行符(\n)分隔。还支持CRLF字符(\r\n)，因为后面的空格会被忽略。
+
+我们可以调整JSON解析器的容忍度，以处理不完全符合标准的数据。也可以改变行为来处理那些被认为已损坏的记录。下面的选项允许配置解析器的行为：
+
+- `allowComments (default: false)`
+
+    当启用时，允许在文件中添加Java/c++风格的注释，并忽略相应的行。例如：
+
+    ```
+    // Timestamps are in ISO 8601 compliant format
+    {"id":"x097abba", "timestamp": "2018-04-01T16:32:56+00:00"}
+    {"id":"x053ba0bab", "timestamp": "2018-04-01T16:35:02+00:00"}
+    ```
+
+- `allowNumericLeadingZeros (default: false)`
+
+    当启用时，允许数字前导零(例如，00314)。否则，前导零被认为是无效的数值，相应的记录被认为已损坏，并按照模式设置进行处理。
+
+- `allowSingleQuotes (default: true)`
+
+    允许使用单引号来标记字段。当启用时，允许使用单引号和双引号。无论此设置如何，引号字符都不能嵌套，并且在值中使用时必须正确转义。例如：
+
+    ```
+    // valid record
+    {"firstname":"Alice", 'lastname': 'Wonderland'}
+    
+    // invalid nesting
+    {"firstname":'Elvis "The King"', 'lastname': 'Presley'}
+    
+    // correct escaping
+    {"firstname":'Elvis \"The King\"', 'lastname': 'Presley'}
+    ```
+
+- `allowUnquotedFieldNames (default: false)`
+
+    允许不带引号的JSON字段名(例如，{firstname:"Alice"})。请注意，当使用此选项时，字段名中不能有空格(例如，{first name:"Alice"}被认为是损坏的，即使字段名与模式匹配)。谨慎使用。
+
+- `multiLine (default: false)`
+
+    启用后，解析器不会解析JSON行，而是将每个文件的内容视为一个有效的JSON文档，并尝试按照定义的模式将其内容解析为记录。
+    
+    当文件的生产者只能将完整的json文档作为文件输出时，请使用此选项。在这种情况下，使用顶级数组对记录进行分组，如示例10-2所示：
+
+    ```
+    [
+        {"firstname":"Alice", "last name":"Wonderland", "age": 7},
+        {"firstname":"Coraline", "last name":"Spin"   , "age":15}
+    ]
+    ```
+
+- `primitivesAsString (default false)`
+
+    启用时，基本值类型被认为是字符串。这允许您读取具有混合类型字段的文档，但所有值都作为字符串读取。
+    
+    在例10-3中，年龄字段类型为String，其中Coraline的age="15"， Diana的age="unknown"。
+
+    ```
+    {"firstname":"Coraline", "last name":"Spin", "age": 15}
+    {"firstname":"Diana", "last name":"Prince", "age": "unknown"}
+    ```
+
+#### CSV文件格式
+
+CSV是一种流行的表格数据存储和交换格式，得到了企业应用程序的广泛支持。CSV数据源允许我们在`Structured Streaming`应用程序中处理此类数据。虽然“CSV”最初表示值之间用逗号分隔，但通常可以自由配置分隔字符。有许多配置选项可用来控制数据从纯文本转换为结构化记录的方式。
+
+在本节的其余部分中，我们将讨论最常见的选项，特别是那些与流处理相关的选项。与格式相关的选项，请参考最新的文档。这些是最常用的CSV解析选项。
+
+##### CSV解析选项
+
+- `comment (default: “” [disabled])`
+
+    配置一个标记作为注释行的字符。例如，当使用选项("comment"，"#")时，我们可以解析下面带有注释的CSV。
+
+    ```
+    #Timestamps are in ISO 8601 compliant format
+    x097abba, 2018-04-01T16:32:56+00:00, 55
+    x053ba0bab, 2018-04-01T16:35:02+00:00, 32
+    ```
+
+- `header (default: false)`
+
+    如果使用提供的模式，则标题行将被忽略，并且不起作用。
+
+- `multiline (default: false)`
+
+    将每个文件看作一个记录。
+
+- `quote (default: " [double quote])`
+
+    配置字符类型的符号。
+
+- `sep (default: , [comma])`
+
+    配置字段分隔符。
+
+
+#### parquet文件格式
+
+`Apache Parquet`是一种面向列的、基于文件的数据存储格式。内部表示将原始行分割成使用压缩技术存储的列块。因此，需要特定列的查询不需要读取完整的文件。相反，相关的部分可以独立处理和检索。Parquet支持复杂的嵌套数据结构和模式结构。由于其增强的查询能力、高效的存储空间和模式信息的保存，Parquet是存储大型复杂数据集的流行格式。
+
+##### 定义模式
+
+要从Parquet文件创建数据源，提供数据模式和目录位置就足够了。
+
+示例10-4显示了使用提供的模式从`hdfs://data/folder`文件夹中创建基于parquet的数据源。
+
+```
+// Use format and load path
+val fileStream = spark.readStream
+.schema(schema)
+.parquet("hdfs://data/folder")
+```
+
+#### 文本文件格式
+
+文本格式支持输入纯文本文件。使用配置选项，可以逐行获取文本或将整个文件作为单个文本blob。这个数据源产生的数据模式通常是string类型，不需要指定。这是一种通用格式，我们可以使用它来获取任意文本以进行进一步的处理，从著名的单词计数到私有文本格式的自定义解析。
+
+##### 文本获取选项
+
+文本文件格式支持使用`wholetext`选项将文本文件作为一个整体读取。
+
+- `wholetext (default false)`
+
+    如果为true，则将完整文件读取为单个文本blob。否则，使用标准的行分隔符(\n， \r\n， \r)将文本分割成行，并将每行看作是一条记录。
+
+##### 文本和文本文件
+
+文本格式支持两个API：
+
+- text
+
+    返回一个动态类型的`DataFrame`，只有一个StringType类型的value字段。
+
+- textFile
+
+    返回`Dataset[String]`。
+
+我们可以使用`text`或`format("text")`。为了获得一个静态类型的数据集，我们必须使用`textFile`。例10-5中的示例说明了具体的API的使用。
+
+```
+// Text specified as format
+>val fileStream = spark.readStream.format("text").load("hdfs://data/folder")
+fileStream:org.apache.spark.sql.DataFrame = [value:string]
+
+// Text specified through dedicated method
+>val fileStream = spark.readStream.text("hdfs://data/folder")
+fileStream:org.apache.spark.sql.DataFrame = [value:string]
+
+// TextFile specified through dedicated method
+val fileStream = spark.readStream.textFile("/tmp/data/stream")
+fileStream:org.apache.spark.sql.Dataset[String] = [value:string]
+```
+
+### <span id="kafka-source">kafka数据源</span>
+
+Apache Kafka是一个基于分布式日志概念的发布/订阅(pub/sub)系统。Kafka是高度可扩展的，提供了高吞吐量，低延迟的数据处理。在Kafka中，组织单元是topic。发布者发送数据到一个主题，订阅者从他们订阅的主题接收数据。这种数据传递以可靠的方式进行。Apache Kafka已经成为消息传递基础设施的流行选择。
+
+`Structured Streaming`中的Kafka数据源实现了订阅者角色，可以使用一个或多个主题的数据。这是一个可靠的消息来源。回顾我们在“理解数据源”的讨论，这意味着即使在部分或全部失败以及重新启动流处理应用的情况下，数据传递语义也得到了保证。
+
+#### 设置kafka数据源
+
+为了创建一个Kafka数据源，我们在Spark Session中使用`format(“Kafka”)`方法。我们需要两个必须的参数来连接到Kafka: Kafka broker的地址，以及我们想要连接到的主题。
+
+Kafka broker的地址是通过`kafka.bootstrap.servers`提供的，它是一个字符串，包含一个以逗号分隔的`host:port`。
+
+例10-6给出了一个简单的Kafka数据源定义。它通过连接到位于host1:port1、host2:port2和host3:port3的代理来订阅单主题topic1。
+
+
+```
+>val kafkaStream = spark.readStream
+.format("kafka")
+.option("kafka.bootstrap.servers", "host1:port1,host2:port2,host3:port3")
+.option("subscribe", "topic1")
+.option("checkpointLocation", "hdfs://spark/streaming/checkpoint")
+.load()
+
+kafkaStream:org.apache.spark.sql.DataFrame = [key:binary, value:binary... 5 morefields]
+
+>kafkaStream.printSchema
+root
+ |-- key:binary (nullable = true) 
+ |-- value:binary (nullable = true) 
+ |-- topic:string (nullable = true) 
+ |-- partition:integer (nullable = true) 
+ |-- offset:long (nullable = true) 
+ |-- timestamp:timestamp (nullable = true) 
+ |-- timestampType:integer (nullable = true
+
+>val dataStream = kafkaStream.selectExpr("CAST(key AS STRING)","CAST(value AS STRING)").as[(String, String)]
+dataStream:org.apache.spark.sql.Dataset[(String, String)] = [key:string, value:string]
+```
+
+该调用的结果是一个带有五个字段的`DataFrame`:键、值、主题、分区、偏移量、时间戳、timestamp类型。Kafka数据源模式是固定的。它提供来自Kafka的原始键和值，以及每个消耗记录的元数据。
+
+通常，我们只对消息的键和值感兴趣。键和值都包含二进制有效负载，内部表示为字节数组。当数据使用String序列化器写入Kafka时，我们可以通过将值转换为String来读取数据，就像我们在示例的最后一个表达式中所做的那样。虽然基于文本的编码是一种常见的实践，但它不是空间效率最高的方式。其他编码，比如AVRO格式，可以提供更好的空间效率，还可以嵌入模式信息。
+
+消息中的附加元数据(如主题、分区或偏移量)可以用于更复杂的场景。例如，topic字段将包含产生这条记录的主题，可以用作标签或标识符，以防我们同时订阅了多个主题。
+
+#### 选择主题订阅方法
+
+有三种不同的方式来指定我们想要使用的主题：
+
+- subscribe
+- subscribePattern
+- assign
+
+Kafka数据源设置必须包含且只包含一个订阅选项。它们为选择主题甚至订阅的分区提供了不同级别的灵活性。
+
+- subscribe
+
+    接受单个主题或以逗号分隔的主题列表:topic1, topic2，…，topicn。该方法订阅每个主题，并使用所有主题联合的数据创建一个单一、统一的流。例如，`.option("subscribe","topic1,topic3")`。
+
+- subscribePattern
+
+    行为上与subscribe类似，但主题是用正则表达式指定的。例如，如果我们有主题'factory1Sensors'， 'factory2Sensors'， 'street1Sensors'， 'street2Sensors'，我们可以用表达式订阅所有的"工厂"传感器。`option("subscribePattern"， "factory[\\d]+Sensors")`。
+
+- assign
+
+    允许使用每个主题的特定分区的细粒度规范。这在Kafka API中被称为`TopicPartitions`。每个主题的分区使用一个JSON对象表示，其中每个键是一个主题，其值是一个分区数组。例如，选项定义`.option("assign"，"" {"sensors":[0,1,3]}""")`将订阅主题sensors的分区0、1和3。要使用这种方法，我们需要关于主题划分的信息。我们可以通过使用kafka API或配置来获取分区信息。
+
+#### 配置kafka数据源选项
+
+`Structured Streaming`的Kafka数据源有两类配置选项:专用配置，以及直接给底层Kafka消费者的传递选项：
+
+##### kafka数据源特有选项
+
+以下选项配置Kafka数据源的行为。它们与偏移量有关:
+
+- `startingOffsets (default: latest)`
+
+    可接受的值是`earliest, latest`，或者一个JSON对象，它代表了主题、它们的分区和给定的偏移量之间的关联。实际偏移量总是正数。有两个特殊的偏移值:-2表示`earliest`，-1表示`latest`。例如，`"""{"topic1":{"0":1,"1":2,"2":1024}}"""`。
+
+    `startgoffsets`只在查询第一次启动时使用。所有后续启动都将使用检查点信息。要从特定的偏移量重新启动流作业，我们需要删除检查点的内容。
+
+- `failOnDataLoss (default: true)`
+
+    此标志指示是否在数据丢失的情况下让重启流查询失败。这通常发生在偏移量超出范围、主题被删除或主题被重新平衡的时候。我们建议在开发/测试周期中将此选项设置为false，因为连续的停止/重启查询端经常会引发故障。在生产环境时，将此设置为true。
+
+- `kafkaConsumer.pollTimeoutMs (default: 512)`
+
+    轮询超时(毫秒)，用于在Spark executor上运行的分布式消费者中等待来自Kafka的数据。
+
+- `fetchOffset.numRetries (default: 3)`
+
+    获取Kafka偏移量失败之前的重试次数。
+
+- `fetchOffset.retryIntervalMs (default: 10)`
+
+    重试偏移量读取之间的延迟，以毫秒为单位。
+
+- `maxOffsetsPerTrigger (default: not set)`
+
+    这个选项允许我们为每次查询触发器消耗的总记录数量设置一个速率限制。配置的限制将在订阅主题的一组分区中平均分配。
+
+
+#### kafka消费选项
+
+可以向底层Kafka消费者传递配置选项。我们通过添加`'kafka.'`前缀来做到这一点。
+
+例如，为Kafka数据源配置TLS选项，我们可以设置`kafka.security.protocol`。
+
+例10-7演示了如何使用此方法为Kafka源配置TLS。
+
+```
+val tlsKafkaSource = spark.readStream.format("kafka")
+.option("kafka.bootstrap.servers", "host1:port1, host2:port2")
+.option("subscribe", "topsecret")  .option("kafka.security.protocol", "SSL")
+.option("kafka.ssl.truststore.location", "/path/to/truststore.jks")
+.option("kafka.ssl.truststore.password", "truststore-password")
+.option("kafka.ssl.keystore.location", "/path/to/keystore.jks")
+.option("kafka.ssl.keystore.password", "keystore-password")
+.option("kafka.ssl.key.password", "password")
+.load()
+```
+
+```
+关于Kafka消费者配置选项的详细列表，请参考Kafka官方文档。
+```
+
+##### 禁用的配置选项
+
+并不是所有来自标准消费者配置的选项都可以使用，因为它们有些与数据源的内部处理有冲突，后者是由“Kafka数据源特有选项”中的设置控制的。
+
+禁止使用这些选项，如表10-1所示。这意味着尝试使用它们中的任何一个都会导致`IllegalArgumentException`。
+
+|  选项   | 原因  | 替代  |
+|  ----  | ----  | ---- |
+| auto.offset.reset  | 偏移量由Structured Streaming管理 | 使用startingOffsets |
+| enable.auto.commit | 偏移量由Structured Streaming管理 | |
+| group.id | 在每个查询内部管理一个惟一的组ID | |
+| key.deserializer | 总是以字节数组表示 | 对特定格式的反序列化是通过编程完成的 |
+| value.deserializer | 总是以字节数组表示 | 对特定格式的反序列化是通过编程完成的 |
+| interceptor.classes | interceptor.classes | |
+
+
+### <span id="socket-source">socket数据源</span>
+
+传输控制协议(TCP)是一个面向连接的协议，它允许客户端和服务器之间的双向通信。此协议支持internet上的许多高级通信协议，如FTP、HTTP、MQTT和许多其他协议。尽管像http这样的应用层协议在TCP连接上添加了额外的语义，但仍有许多应用程序通过UNIX套接字提供一个普通的、基于文本的TCP连接来传送数据。
+
+socket数据源是一个TCP套接字客户端，能够连接到提供UTF-8编码的基于文本的数据流的TCP服务器。要连接到服务器，必须提供主机和端口选项。
+
+#### 配置
+
+要连接到TCP服务器，我们需要主机的地址和端口号。也可以为接收的每一行数据添加时间戳。
+
+配置选项如下：
+
+- `host (mandatory)`
+
+    要连接的TCP服务器的DNS主机名或IP地址。
+
+- `port (mandatory)`
+
+    要连接的TCP服务器的端口号。
+
+- `includeTimestamp (default: false)`
+
+    当启用时，Socket数据源将到达的时间戳添加到每一行数据中。它将更改由该数据源产生的模式，将时间戳添加到一个附加字段。
+
+在示例10-8中，我们观察到该数据源提供的两种操作模式。通过主机、端口配置，生成的`DataFrame`有一个名为String类型的`value`字段。当我们将标志`includeTimestamp`设置为true时，结果`DataFrame`的模式包含字段value和timestamp，其中value和之前一样是String类型，timestamp是timestamp类型。另外，请注意此数据源在创建时打印的日志警告。
+
+```
+// Only using host and port
+>val stream = spark.readStream
+.format("socket")
+.option("host", "localhost")
+.option("port", 9876)
+.load()
+
+18/04/14 17:02:34 WARNTextSocketSourceProvider:The socket source should not be used for production applications!It does not support recovery.stream:org.apache.spark.sql.DataFrame = [value:string]
+
+// With added timestamp information
+val stream = spark.readStream
+.format("socket")
+.option("host", "localhost")
+.option("port", 9876)
+.option("includeTimestamp", true)
+.load()
+
+18/04/14 17:06:47 WARNTextSocketSourceProvider:The socket source should not be used for production applications!It does not support recovery.
+
+stream:org.apache.spark.sql.DataFrame = [value:string, timestamp:timestamp]
+```
+
+#### 操作
+
+socket数据源创建一个连接到配置中指定的TCP服务器的TCP客户端。该客户端运行在Spark驱动上。它将传入的数据保存在内存中，直到查询消耗了数据并提交了相应的偏移量。已提交偏移量的数据将被清除，使内存使用在正常情况下保持稳定。
+
+回想一下“理解数据源”的讨论，如果一个数据源即使在流处理失败和重新启动的情况下也能重放未提交的偏移量，那么这个数据源就被认为是可靠的。socket数据源被认为是不可靠的，因为Spark驱动程序的失败将导致丢失内存中所有未提交的数据。
+
+socket数据源应该只用于数据丢失是可以接受的情况。
+
+```
+使用Socket数据源直接连接到TCP服务器的一个常见的替代架构是使用Kafka作为可靠的中间存储。一个健壮的微服务可以用来连接TCP服务器和Kafka。这个微服务从TCP服务器收集数据，并自动地将其发送给Kafka。然后，我们可以使用Kafka数据源来消费数据并在Structured Streaming中进一步处理它。
+```
+
+### <span id="rate-source">rate数据源</span>
+
+rate数据源是一个内部流生成器，它以可配置的频率(记录/秒)产生一系列记录。输出是一个记录流(时间戳，值)，其中时间戳对应于记录产生的时刻，而值是一个不断增加的计数器。
+
+```
+> val stream = spark.readStream.format("rate").load()
+stream:org.apache.spark.sql.DataFrame = [timestamp:timestamp, value:bigint]
+```
+
+这是为了进行基准测试和研究`Structured Streaming`，因为它不依赖外部系统来工作。正如我们在前面的示例中所看到的，创建它非常容易，并且完全独立。
+
+示例10-9中的代码创建的速率为每秒100行，时间为60秒。`DataFrame`的模式包含两个字段:timestamp类型的时间戳和value, value类型是`BigInt`，在内部表示中是`Long`。
+
+```
+> val stream = spark.readStream.format("rate")
+.option("rowsPerSecond", 100)
+.option("rampUpTime",60)
+.load()
+
+stream:org.apache.spark.sql.DataFrame = [timestamp:timestamp, value:bigint]
+```
+
+#### 选项
+
+速率源支持控制吞吐量和并行的几个选项：
+
+- `rowsPerSecond (default: 1)`
+
+    每秒要生成的行数。
+
+- `rampUpTime (default: 0)`
+
+    在流的开始，记录的生成将逐渐增加，直到达到这个时间点。增长是线性的。
+
+- `numPartitions (default: default spark parallelism level)`
+
+    要生成的分区数。更多的分区增加了记录生成和下游查询处理的并行级别。
 
 <div style ="page-break-after：always;"> </div>
